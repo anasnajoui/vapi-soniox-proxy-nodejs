@@ -46,10 +46,11 @@ function createSonioxSocket(vapiSocket, sampleRateRef, who) {
     console.log(`Connesso a Soniox per ${who}`);
     sonioxSocket.send(JSON.stringify({
       api_key: process.env.SONIOX_API_KEY,
-      model: "it_IT", // MODIFICATO PER ITALIANO
+      model: "stt-rt-v3", // MODELLO AGGIORNATO E CORRETTO
+      language_hints: ["it"], // Suggerimento per l'italiano
       audio_format: "pcm_s16le",
       sample_rate: sampleRateRef.value,
-      num_channels: 1, // Inviamo audio mono
+      num_channels: 1, // Inviamo audio mono separato
       enable_endpoint_detection: true,
       enable_language_identification: false
     }));
@@ -71,8 +72,9 @@ function createSonioxSocket(vapiSocket, sampleRateRef, who) {
         if (t.text === '<end>') {
           const text = segment.join('').replace(/\s+/g, ' ').trim();
           segment = [];
-          if (text && who === 'customer') { // INVIAMO SOLO LA TRASCRIZIONE DEL CLIENTE
-            console.log(`→ ${who}: ${text}`);
+          // INVIAMO A VAPI SOLO LA TRASCRIZIONE DEL CLIENTE
+          if (text && who === 'customer') {
+            console.log(`→ Vapi (da ${who}): ${text}`);
             vapiSocket.send(JSON.stringify({
               type: 'transcriber-response',
               transcription: text,
