@@ -4,6 +4,7 @@ dotenv.config();
 
 const PORT = process.env.PORT || 3000;
 
+// Funzioni per separare l'audio stereo
 function stereoToMonoLeft(buf) {
   const out = Buffer.alloc(buf.length / 2);
   for (let i = 0, j = 0; i < buf.length; i += 4, j += 2) {
@@ -21,10 +22,11 @@ function stereoToMonoRight(buf) {
   return out;
 }
 
+// Funzione per creare una connessione Soniox (logica finale)
 function createSonioxSocket(vapiSocket, sampleRate, who) {
   const sonioxSocket = new WebSocket('wss://stt-rt.soniox.com/transcribe-websocket', { perMessageDeflate: false });
 
-  let segment = [];
+  let finalTranscriptSinceLastEndpoint = '';
 
   sonioxSocket.on('open', () => {
     console.log(`Connesso a Soniox per ${who}`);
@@ -36,11 +38,13 @@ function createSonioxSocket(vapiSocket, sampleRate, who) {
       sample_rate: sampleRate,
       num_channels: 1,
       enable_endpoint_detection: true,
-      include_nonfinal: false,
+      include_nonfinal: true, // ABILITIAMO I RISULTATI PROVVISORI
     }));
   });
 
   sonioxSocket.on('message', (sMsg) => {
+    if (who !== 'customer') return; // Lavoriamo solo sulla trascrizione del cliente
+
     try {
       const resp = JSON.parse(sMsg.toString());
       if (resp.error_code) {
@@ -48,18 +52,28 @@ function createSonioxSocket(vapiSocket, sampleRate, who) {
         return;
       }
 
-      (resp.final_words || []).forEach(t => segment.push(t.text));
+      // Ricostruiamo la trascrizione finale e provvisoria della frase corrente
+      const currentFinal = (resp.final_words || []).map(w => w.text).join('');
+      const currentInterim = (resp.nonfinal_words || []).map(w => w.text).join('');
+      
+      const fullUtterance = (finalTranscriptSinceLastEndpoint + currentFinal + currentInterim).trim();
 
-      if (resp.endpoint_detected && who === 'customer' && segment.length > 0) {
-        const text = segment.join('').trim();
-        console.log(`→ Vapi (da ${who}): ${text}`);
+      // Inviamo a Vapi ogni aggiornamento per mantenere la conversazione viva
+      if (fullUtterance) {
         vapiSocket.send(JSON.stringify({
           type: 'transcriber-response',
-          transcription: text,
+          transcription: fullUtterance,
           channel: who
         }));
-        segment = [];
       }
+
+      // Quando Soniox rileva la fine di una frase, "salviamo" la trascrizione finale
+      // e resettiamo per la frase successiva.
+      if (resp.endpoint_detected) {
+        console.log(`Endpoint rilevato per: "${(finalTranscriptSinceLastEndpoint + currentFinal).trim()}"`);
+        finalTranscriptSinceLastEndpoint = ''; 
+      }
+      
     } catch (e) {
       console.error(`Errore nel parsing del messaggio Soniox (${who}):`, e);
     }
