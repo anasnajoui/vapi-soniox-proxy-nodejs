@@ -24,7 +24,7 @@ function stereoToMonoRight(buf) {
 function createSonioxSocket(vapiSocket, sampleRate, who) {
   const sonioxSocket = new WebSocket('wss://stt-rt.soniox.com/transcribe-websocket', { perMessageDeflate: false });
 
-  let finalTranscript = '';
+  let segment = [];
 
   sonioxSocket.on('open', () => {
     console.log(`Connesso a Soniox per ${who}`);
@@ -36,13 +36,11 @@ function createSonioxSocket(vapiSocket, sampleRate, who) {
       sample_rate: sampleRate,
       num_channels: 1,
       enable_endpoint_detection: true,
-      include_nonfinal: true, // Chiediamo i risultati provvisori
+      include_nonfinal: false,
     }));
   });
 
   sonioxSocket.on('message', (sMsg) => {
-    if (who !== 'customer') return; // Ignoriamo completamente la trascrizione del bot
-
     try {
       const resp = JSON.parse(sMsg.toString());
       if (resp.error_code) {
@@ -50,26 +48,18 @@ function createSonioxSocket(vapiSocket, sampleRate, who) {
         return;
       }
 
-      // Ricostruiamo la trascrizione finale e provvisoria
-      const currentFinal = (resp.final_words || []).map(w => w.text).join('');
-      const currentInterim = (resp.nonfinal_words || []).map(w => w.text).join('');
-      const fullTranscript = (finalTranscript + currentFinal + currentInterim).trim();
+      (resp.final_words || []).forEach(t => segment.push(t.text));
 
-      // Invia a Vapi ogni aggiornamento
-      if (fullTranscript) {
-        //console.log(`~> Vapi (da ${who}): ${fullTranscript}`);
+      if (resp.endpoint_detected && who === 'customer' && segment.length > 0) {
+        const text = segment.join('').trim();
+        console.log(`→ Vapi (da ${who}): ${text}`);
         vapiSocket.send(JSON.stringify({
           type: 'transcriber-response',
-          transcription: fullTranscript,
+          transcription: text,
           channel: who
         }));
+        segment = [];
       }
-
-      // Se la frase è finita, "solidifichiamo" la trascrizione finale
-      if (resp.endpoint_detected) {
-        finalTranscript += currentFinal;
-      }
-      
     } catch (e) {
       console.error(`Errore nel parsing del messaggio Soniox (${who}):`, e);
     }
