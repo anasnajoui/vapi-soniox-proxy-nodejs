@@ -4,7 +4,6 @@ dotenv.config();
 
 const PORT = process.env.PORT || 3000;
 
-// Funzione per estrarre il canale SINISTRO (utente) dall'audio stereo
 function stereoToMonoLeft(buf) {
   const out = Buffer.alloc(buf.length / 2);
   for (let i = 0, j = 0; i < buf.length; i += 4, j += 2) {
@@ -13,32 +12,23 @@ function stereoToMonoLeft(buf) {
   }
   return out;
 }
-// Funzione per estrarre il canale DESTRO (assistente) dall'audio stereo
-function stereoToMonoRight(buf) {
-  const out = Buffer.alloc(buf.length / 2);
-  for (let i = 0, j = 0; i < buf.length; i += 4, j += 2) {
-    out[j] = buf[i+2];
-    out[j+1] = buf[i+3];
-  }
-  return out;
-}
 
-// Funzione per creare una singola connessione a Soniox
-function createSonioxSocket(vapiSocket, sampleRate, who) {
+function createSonioxSocket(vapiSocket, sampleRate) {
   const sonioxSocket = new WebSocket('wss://stt-rt.soniox.com/transcribe-websocket', { perMessageDeflate: false });
 
-  let segment = [];
+  let finalTranscript = ''; // Tiene traccia del testo confermato
 
   sonioxSocket.on('open', () => {
-    console.log(`Connesso a Soniox per ${who}`);
+    console.log(`Connesso a Soniox per il cliente`);
     sonioxSocket.send(JSON.stringify({
       api_key: process.env.SONIOX_API_KEY,
-      model: "stt-rt-v3", // Modello Corretto
-      language_hints: ["it"], // Lingua Corretta
+      model: "stt-rt-v3",
+      language_hints: ["it"],
       audio_format: "pcm_s16le",
       sample_rate: sampleRate,
       num_channels: 1,
       enable_endpoint_detection: true,
+      include_nonfinal: true, // Chiediamo a Soniox anche i risultati provvisori
     }));
   });
 
@@ -46,30 +36,33 @@ function createSonioxSocket(vapiSocket, sampleRate, who) {
     try {
       const resp = JSON.parse(sMsg.toString());
       if (resp.error_code) {
-        console.error(`Errore Soniox (${who}):`, resp.error_code, resp.error_message);
+        console.error(`Errore Soniox:`, resp.error_code, resp.error_message);
         return;
       }
 
-      // Raccogliamo le parole finali
-      (resp.final_words || []).forEach(t => segment.push(t.text));
+      // Ricostruiamo la trascrizione finale stabile
+      finalTranscript = (resp.final_words || []).map(w => w.text).join('');
+      // Prendiamo la parte provvisoria attuale
+      const interimTranscript = (resp.nonfinal_words || []).map(w => w.text).join('');
 
-      // Se Soniox rileva una pausa, inviamo la frase completa SOLO per il cliente
-      if (resp.endpoint_detected && who === 'customer' && segment.length > 0) {
-        const text = segment.join('').trim();
-        console.log(`→ Vapi (da ${who}): ${text}`);
+      // La trascrizione completa da inviare a Vapi è la parte finale + quella provvisoria
+      const fullTranscript = (finalTranscript + interimTranscript).trim();
+
+      if (fullTranscript) {
+        console.log(`~> Vapi: ${fullTranscript}`);
         vapiSocket.send(JSON.stringify({
           type: 'transcriber-response',
-          transcription: text,
-          channel: who
+          transcription: fullTranscript,
+          channel: 'customer'
         }));
-        segment = []; // Reset per la prossima frase
       }
+
     } catch (e) {
-      console.error(`Errore nel parsing del messaggio Soniox (${who}):`, e);
+      console.error(`Errore nel parsing del messaggio Soniox:`, e);
     }
   });
 
-  sonioxSocket.on('error', (err) => console.error(`Errore Soniox ${who}:`, err));
+  sonioxSocket.on('error', (err) => console.error(`Errore Soniox:`, err));
 
   return sonioxSocket;
 }
@@ -78,11 +71,9 @@ const wss = new WebSocketServer({ port: PORT, perMessageDeflate: false }, () => 
   console.log(`Server proxy in ascolto su ws://localhost:${PORT}`);
 });
 
-// Gestore principale che replica la logica di Edel
 wss.on('connection', (vapiSocket) => {
   console.log('Vapi connesso');
-
-  let leftSocket, rightSocket; // Socket per customer e assistant
+  let sonioxSocket;
 
   vapiSocket.on('message', (msg, isBinary) => {
     if (!isBinary) {
@@ -91,28 +82,21 @@ wss.on('connection', (vapiSocket) => {
         if (data.type === 'start') {
           const sampleRate = data.sampleRate || 16000;
           console.log('Ricevuto messaggio di start, Sample Rate=', sampleRate);
-          // Crea una connessione Soniox per il canale sinistro (utente)
-          leftSocket = createSonioxSocket(vapiSocket, sampleRate, "customer");
-          // Crea una connessione Soniox per il canale destro (assistente), come faceva Edel
-          rightSocket = createSonioxSocket(vapiSocket, sampleRate, "assistant");
+          sonioxSocket = createSonioxSocket(vapiSocket, sampleRate);
         }
-      } catch(e) { console.error("Errore parsing JSON Vapi:", e); }
-    } else {
-      // Inoltra l'audio separato ai rispettivi socket Soniox
-      if (leftSocket?.readyState === WebSocket.OPEN) {
-        const mono = stereoToMonoLeft(msg);
-        leftSocket.send(mono);
+      } catch (e) {
+        console.error("Errore nel parsing del messaggio JSON da Vapi:", e);
       }
-      if (rightSocket?.readyState === WebSocket.OPEN) {
-        const mono = stereoToMonoRight(msg);
-        rightSocket.send(mono);
+    } else {
+      if (sonioxSocket?.readyState === WebSocket.OPEN) {
+        const mono = stereoToMonoLeft(msg);
+        sonioxSocket.send(mono);
       }
     }
   });
 
   vapiSocket.on('close', () => {
     console.log('Vapi disconnesso');
-    leftSocket?.close();
-    rightSocket?.close();
+    sonioxSocket?.close();
   });
 });
