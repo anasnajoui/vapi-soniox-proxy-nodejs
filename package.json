@@ -1,0 +1,14 @@
+{
+    "name": "vapi-soniox-proxy-nodejs",
+    "version": "1.0.0",
+    "description": "Proxy server for Vapi and Soniox",
+    "main": "index.js",
+    "type": "module",
+    "scripts": {
+      "start": "node index.js"
+    },
+    "dependencies": {
+      "dotenv": "^16.4.5",
+      "ws": "^8.18.0"
+    }
+  }
